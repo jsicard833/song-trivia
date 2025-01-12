@@ -26,10 +26,12 @@ class SongTriviaServer:
         self.send_names_to_clients(my_server)
         for _ in range(15):
             question = self.create_question_list()
-            print(self.correct_answer)
-            print(self.track_dict[self.correct_answer])
+            #print(self.correct_answer)
+            #print(self.track_dict[self.correct_answer])
             start_time = self.get_random_start_time()
             my_server.send_list_to_clients(question + [self.correct_answer, self.track_dict[self.correct_answer], start_time])
+            my_server.get_ready_from_clients()
+            my_server.broadcast("START")
             answers = my_server.get_answer_from_clients()
             for client_name, client_answer in answers:
                 print(f"{client_name}: {client_answer}")
@@ -66,7 +68,8 @@ class SongTriviaServer:
         self.chosen_songs.append(self.correct_answer)
         # Choose 3 other random songs from the playlist
         other_songs = random.sample(list(self.track_dict.keys()), 3)
-        while any(song in self.chosen_songs for song in other_songs):
+        # Check that the other songs are not the same as the correct answer
+        while self.correct_answer in other_songs:
             other_songs = random.sample(list(self.track_dict.keys()), 3)
         # Create a list of the 4 songs
         songs = [self.correct_answer] + other_songs

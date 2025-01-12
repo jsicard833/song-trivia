@@ -12,10 +12,10 @@ class Server:
 
     def start(self) -> None:
         self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(3)  # Only allow two connections
+        self.server_socket.listen(2)  # Only allow two connections
         print(f"[LISTENING] Server is listening on {self.host}:{self.port}")
 
-        while len(self.clients) < 3:
+        while len(self.clients) < 2:
             client_socket, client_address = self.server_socket.accept()
             with self.client_lock:
                 username = client_socket.recv(1024).decode("utf-8").strip()
@@ -62,8 +62,17 @@ class Server:
                     answer = client_socket.recv(1024).decode("utf-8")
                     answers.append((username, answer))
                 except Exception as e:
-                    print(f"[ERROR] Receiving answer from {client_address}: {e}")
+                    print(f"[ERROR] Receiving answer from {username}: {e}")
         return answers
+    
+    def get_ready_from_clients(self) -> None:
+        """Wait for all clients to be ready."""
+        with self.client_lock:
+            for client_socket, _, username in self.clients:
+                try:
+                    client_socket.recv(1024)
+                except Exception as e:
+                    print(f"[ERROR] Receiving ready message from {username}: {e}")
 
 if __name__ == "__main__":
     server = Server()
