@@ -1,8 +1,6 @@
 import subprocess
 import sys
 import os
-import urllib.request
-import zipfile
 
 def install_and_import(package):
     try:
@@ -10,55 +8,18 @@ def install_and_import(package):
     except ImportError:
         if package == "yt_dlp":
             subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp"])
+        elif package == "vlc":
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "python-vlc"])
         else:
             subprocess.check_call([sys.executable, "-m", "pip", "install", package])
         __import__(package)
 
-def install_ffmpeg():
-    ffmpeg_dir = "C:\\ffmpeg"
-    ffmpeg_bin_dir = os.path.join(ffmpeg_dir, "bin")
-
-    if not os.path.exists(ffmpeg_bin_dir):
-        print("FFmpeg not found. Installing...")
-        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        zip_path = os.path.join(ffmpeg_dir, "ffmpeg.zip")
-
-        if not os.path.exists(ffmpeg_dir):
-            os.mkdir(ffmpeg_dir)
-
-        # Download FFmpeg
-        urllib.request.urlretrieve(url, zip_path)
-
-        # Extract FFmpeg
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(ffmpeg_dir)
-
-        # Move extracted files to the correct location
-        extracted_dir = os.path.join(ffmpeg_dir, os.listdir(ffmpeg_dir)[0])
-        for item in os.listdir(extracted_dir):
-            s = os.path.join(extracted_dir, item)
-            d = os.path.join(ffmpeg_dir, item)
-            if os.path.isdir(s):
-                os.rename(s, d)
-            else:
-                os.rename(s, d)
-
-        # Clean up
-        os.remove(zip_path)
-        os.rmdir(extracted_dir)
-
-        # Add FFmpeg to PATH
-        os.environ["PATH"] += os.pathsep + ffmpeg_bin_dir
-        print("FFmpeg installed and added to PATH.")
-
 
 # List of required packages
-required_packages = ["pygame", "yt_dlp", "pydub"]
+required_packages = ["pygame", "yt_dlp", "pydub", "vlc"]
 
 for package in required_packages:
     install_and_import(package)
-
-#install_ffmpeg()
 
 
 import socket
@@ -67,9 +28,9 @@ import pygame
 import yt_dlp as youtube_dl
 import time
 from pydub import AudioSegment
-import clean_mp3 as clean
 import queue
 import threading
+import vlc
 
 
 SERVER_IP = '3.135.101.123' 
@@ -84,7 +45,6 @@ FONT_SIZE = 24
 class SongTriviaClient:
     def __init__(self):
         pygame.init()
-        pygame.mixer.init()
         self.clock = pygame.time.Clock()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         pygame.display.set_caption("Song Trivia")
@@ -94,20 +54,22 @@ class SongTriviaClient:
         self.players = []
         self.answer = None
         self.answered = False
-        self.volume = 0.5  # Initial volume (50%)
-        pygame.mixer.music.set_volume(self.volume)
+        self.volume = 50  # Initial volume (50%)
         self.slider_rect = pygame.Rect(WIDTH // 2 - 100, HEIGHT - 50, 200, 20)
         self.slider_handle_rect = pygame.Rect(WIDTH // 2 - 10, HEIGHT - 55, 20, 30)
         self.slider_dragging = False
         self.client_socket = None
         self.message_queue = queue.Queue()
+        self.audio_queue = queue.Queue()
+        self.vlc_instance = vlc.Instance()
+        self.vlc_player = self.vlc_instance.media_player_new()
+        self.vlc_player.audio_set_volume(self.volume)
         self.run()
 
     def __del__(self):
         pygame.quit()
         if self.client_socket:
             self.client_socket.close()
-        clean.remove()
 
     def run(self):
         name = self.get_name()
@@ -191,7 +153,7 @@ class SongTriviaClient:
                 break
 
     def game_loop(self):
-        for _ in range(15):
+        for i in range(15):
             self.answered = False
             question = self.get_question()
             self.answer = question[4]
@@ -199,10 +161,35 @@ class SongTriviaClient:
             music_start_time = question[6]
             self.buttons = self.create_buttons(question)
 
-            audo_file = self.download_audio_from_youtube(self.answer + " " + artist + " lyrics")
+            # Start the audio streaming in a separate thread
+            threading.Thread(target=self.stream_audio_thread, args=(self.answer + " " + artist + " lyrics", music_start_time), daemon=True).start()
 
-            if audo_file:
-                self.play_song(audo_file, music_start_time)
+            audio_file = None
+            while audio_file is None:
+                if not self.audio_queue.empty():
+                    audio_file = self.audio_queue.get()
+                    self.client_socket.sendall('Ready'.encode("utf-8"))
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        pygame.quit()
+                        sys.exit()
+                if i == 0:
+                    self.sound_loading_screen()
+                else:
+                    self.show_score_screen(player1, player1points, player2, player2points)
+                self.clock.tick(30)
+
+            # Wait for a response from the server before starting to play the song
+            while True:
+                if not self.message_queue.empty():
+                    self.message_queue.get()
+                    self.play_song(audio_file, music_start_time)
+                    break
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        pygame.quit()
+                        sys.exit()   
+                self.clock.tick(30)
 
             start_time = time.time()
 
@@ -222,7 +209,7 @@ class SongTriviaClient:
                     player2points = points[1][1]
                     #player3 = points[2][0]
                     #player3points = points[2][1]
-                    self.show_score_srceen(player1, player1points, player2, player2points)
+                    self.show_score_screen(player1, player1points, player2, player2points)
                     break
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
@@ -245,6 +232,13 @@ class SongTriviaClient:
                 pygame.display.flip()
                 self.clock.tick(60)
 
+    def sound_loading_screen(self):
+        self.screen.fill(WHITE)
+        loading_text = self.font.render('Loading sound...', True, BLACK)
+        loading_rect = loading_text.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+        self.screen.blit(loading_text, loading_rect)
+        pygame.display.flip()
+
     def get_question(self) -> list:
         # Recieve list of questions from the server
         message = self.message_queue.get()
@@ -256,7 +250,7 @@ class SongTriviaClient:
         button_font = pygame.font.Font(None, FONT_SIZE)
 
         for button in self.buttons:
-            if button == self.clicked_button:
+            if button == self.clicked_button and self.answered:
                 if button['label'] == self.answer:
                     pygame.draw.rect(self.screen, pygame.Color('darkgreen'), button["rect"])
                 else:
@@ -274,7 +268,7 @@ class SongTriviaClient:
         countdown_rect = countdown_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 150))
         self.screen.blit(countdown_text, countdown_rect)
 
-    def show_score_srceen(self, player1, player1points, player2, player2points):
+    def show_score_screen(self, player1, player1points, player2, player2points):
         self.screen.fill(WHITE)
         score_font = pygame.font.Font(None, 36)
         player1_text = score_font.render(f"{player1}: {player1points} points", True, BLACK)
@@ -287,7 +281,6 @@ class SongTriviaClient:
         self.screen.blit(player2_text, player2_rect)
         #self.screen.blit(player3_text, player3_rect)
         pygame.display.flip()
-        pygame.time.wait(3000)
 
     def draw_slider(self):
         pygame.draw.rect(self.screen, BLACK, self.slider_rect)
@@ -303,7 +296,7 @@ class SongTriviaClient:
             if self.slider_dragging:
                 self.slider_handle_rect.x = max(self.slider_rect.x, min(event.pos[0] - self.slider_handle_rect.width // 2, self.slider_rect.x + self.slider_rect.width - self.slider_handle_rect.width))
                 self.volume = (self.slider_handle_rect.x - self.slider_rect.x) / (self.slider_rect.width - self.slider_handle_rect.width)
-                pygame.mixer.music.set_volume(self.volume)
+                self.vlc_player.audio_set_volume(int(self.volume * 100))
 
     def create_buttons(self, question: list) -> list:
         button_width = 500
@@ -315,31 +308,31 @@ class SongTriviaClient:
             {"label": question[3], "rect": pygame.Rect((WIDTH // 2 - button_width // 2, HEIGHT // 2 + 80), (button_width, button_height))}
         ]
         return buttons
-    
-    def download_audio_from_youtube(self, query: str):
+        
+    def stream_audio_from_youtube(self, query: str):
         ydl_opts = {
             'format': 'bestaudio/best',
-            'postprocessors': [{  # Ensure conversion to mp3
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '320',
-            }],
-            'outtmpl': os.path.join('%(id)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
         }
+
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            results = ydl.extract_info(f"ytsearch:{query}", download=True)
+            results = ydl.extract_info(f"ytsearch:{query}", download=False)
             if 'entries' in results:
-                # Get the information of the first video in the search results.
-                video_info = results['entries'][0]
-                audio_file = f"{video_info['id']}.mp3"
-                return audio_file
-            else:
-                return None
+                for entry in results['entries']:
+                    try:
+                        stream_url = entry['url']
+                        return stream_url
+                    except Exception as e:
+                        print(f"Failed to get stream URL for {entry['title']}: {e}")
+        return None
+    
+    def stream_audio_thread(self, query: str, start_time: int):
+        stream_url = self.stream_audio_from_youtube(query)
+        self.audio_queue.put(stream_url)
             
-    def play_song(self, audio_file, start_time):
+    '''def play_song(self, audio_file, start_time):
         # Stop any currently playing music
         pygame.mixer.music.stop()
 
@@ -356,7 +349,16 @@ class SongTriviaClient:
         audio_segment.export(temp_file, format="mp3")
 
         pygame.mixer.music.load(temp_file)
-        pygame.mixer.music.play()
+        pygame.mixer.music.play()'''
+    
+    def play_song(self, stream_url, start_time):
+        # Stop any currently playing music
+        self.vlc_player.stop()
+
+        media = self.vlc_instance.media_new(stream_url)
+        self.vlc_player.set_media(media)
+        self.vlc_player.play()
+        self.vlc_player.set_time(start_time)
 
 
 def main():
